@@ -30,7 +30,11 @@ async function ensureSchema() {
   return schemaPromise;
 }
 
-function validEmail(value) { return typeof value === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value); }
+function validEmail(value) {
+  if (typeof value !== 'string') return false;
+  const parts = value.trim().split('@');
+  return parts.length === 2 && parts[0].length > 0 && parts[1].includes('.') && !parts[1].startsWith('.') && !parts[1].endsWith('.');
+}
 function validUsername(value) { return typeof value === 'string' && /^[A-Za-z0-9_]{3,32}$/.test(value); }
 async function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
