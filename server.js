@@ -30,7 +30,7 @@ async function ensureSchema() {
   return schemaPromise;
 }
 
-function validEmail(value) { return typeof value === 'string' && /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(value); }
+function validEmail(value) { return typeof value === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value); }
 function validUsername(value) { return typeof value === 'string' && /^[A-Za-z0-9_]{3,32}$/.test(value); }
 async function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
