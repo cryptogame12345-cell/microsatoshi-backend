@@ -71,6 +71,7 @@ app.get('/health', async (req, res) => {
   try { await ensureSchema(); await db()`SELECT 1`; res.json({ ok: true, service: 'microsatoshi', database: 'connected' }); }
   catch (error) { res.status(503).json({ ok: false, service: 'microsatoshi', database: 'unavailable' }); }
 });
+
 app.post('/register', async (req, res) => {
   const { username, email, password } = req.body || {};
   if (!validUsername(username) || !validEmail(email) || typeof password !== 'string' || password.length < 8 || password.length > 128) return res.status(400).json({ error: 'Data pendaftaran tidak valid' });
@@ -78,17 +79,32 @@ app.post('/register', async (req, res) => {
     await ensureSchema();
     const sql = db();
     const passwordHash = await hashPassword(password);
-    const rows = await sql`INSERT INTO users (username,email,password_hash) VALUES (${username},${email.toLowerCase()},${passwordHash}) RETURNING id, username, email`;
-    const user = rows[0];
-    await sql`INSERT INTO profiles (user_id, display_name) VALUES (${user.id}, ${user.username})`;
-    await sql`INSERT INTO balances (user_id) VALUES (${user.id})`;
-    await sql`INSERT INTO miners (user_id) VALUES (${user.id})`;
-    res.status(201).json({ ok: true, user });
+    // Satu perintah SQL membuat user dan seluruh record awal secara atomik.
+    const rows = await sql`WITH new_user AS (
+      INSERT INTO users (username, email, password_hash)
+      VALUES (${username}, ${email.toLowerCase()}, ${passwordHash})
+      RETURNING id, username, email
+    ), new_profile AS (
+      INSERT INTO profiles (user_id, display_name)
+      SELECT id, username FROM new_user RETURNING user_id
+    ), new_balance AS (
+      INSERT INTO balances (user_id)
+      SELECT id FROM new_user RETURNING user_id
+    ), new_miner AS (
+      INSERT INTO miners (user_id)
+      SELECT id FROM new_user RETURNING user_id
+    ), new_audit AS (
+      INSERT INTO audit_log (user_id, action)
+      SELECT id, 'register' FROM new_user RETURNING id
+    )
+    SELECT id, username, email FROM new_user`;
+    res.status(201).json({ ok: true, user: rows[0] });
   } catch (error) {
     if (error && error.code === '23505') return res.status(409).json({ error: 'Nama pengguna atau email sudah terdaftar' });
     res.status(500).json({ error: 'Pendaftaran gagal' });
   }
 });
+
 app.post('/login', async (req, res) => {
   const { login, password } = req.body || {};
   if (typeof login !== 'string' || typeof password !== 'string') return res.status(400).json({ error: 'Login tidak valid' });
