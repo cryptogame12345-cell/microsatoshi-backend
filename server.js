@@ -6,12 +6,50 @@ const { neon } = require('@neondatabase/serverless');
 
 const app = express();
 const scrypt = promisify(crypto.scrypt);
-app.use(cors({ origin: true, credentials: true }));
+const allowedOrigins = new Set([
+  'https://microsatoshi.wapka.top',
+  'https://microsatoshi-backend.vercel.app'
+]);
+const rateBuckets = new Map();
+
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
+app.use(cors({
+  origin: (origin, callback) => callback(null, !origin || allowedOrigins.has(origin)),
+  credentials: true
+}));
+app.use((req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  next();
+});
 app.use(express.json({ limit: '32kb' }));
 
 function db() {
   if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL belum dikonfigurasi');
   return neon(process.env.DATABASE_URL);
+}
+
+function rateLimit(name, windowMs = 15 * 60 * 1000, max = 20) {
+  return (req, res, next) => {
+    const now = Date.now();
+    const key = `${name}:${req.ip || 'unknown'}`;
+    let bucket = rateBuckets.get(key);
+    if (!bucket || bucket.resetAt <= now) bucket = { count: 0, resetAt: now + windowMs };
+    bucket.count += 1;
+    rateBuckets.set(key, bucket);
+    if (rateBuckets.size > 10000) {
+      for (const [storedKey, storedBucket] of rateBuckets) {
+        if (storedBucket.resetAt <= now) rateBuckets.delete(storedKey);
+      }
+    }
+    if (bucket.count > max) {
+      res.setHeader('Retry-After', String(Math.ceil((bucket.resetAt - now) / 1000)));
+      return res.status(429).json({ error: 'Terlalu banyak percobaan. Coba lagi nanti.' });
+    }
+    next();
+  };
 }
 
 let schemaPromise;
@@ -49,9 +87,11 @@ async function verifyPassword(password, stored) {
   return expected.length === derived.length && crypto.timingSafeEqual(expected, derived);
 }
 function cookieValue(req, name) {
-  const raw = req.headers.cookie || '';
-  const item = raw.split(';').map(x => x.trim()).find(x => x.startsWith(`${name}=`));
-  return item ? decodeURIComponent(item.slice(name.length + 1)) : null;
+  try {
+    const raw = req.headers.cookie || '';
+    const item = raw.split(';').map(x => x.trim()).find(x => x.startsWith(`${name}=`));
+    return item ? decodeURIComponent(item.slice(name.length + 1)) : null;
+  } catch (_) { return null; }
 }
 function tokenHash(token) { return crypto.createHash('sha256').update(token).digest('hex'); }
 function setSessionCookie(res, token) {
@@ -72,8 +112,12 @@ app.get('/health', async (req, res) => {
   catch (error) { res.status(503).json({ ok: false, service: 'microsatoshi', database: 'unavailable' }); }
 });
 
-app.post('/register', async (req, res) => {
-  const { username, email, password } = req.body || {};
+app.post('/register', rateLimit('register'), async (req, res) => {
+  const rawUsername = req.body && req.body.username;
+  const rawEmail = req.body && req.body.email;
+  const password = req.body && req.body.password;
+  const username = typeof rawUsername === 'string' ? rawUsername.trim() : rawUsername;
+  const email = typeof rawEmail === 'string' ? rawEmail.trim().toLowerCase() : rawEmail;
   if (!validUsername(username) || !validEmail(email) || typeof password !== 'string' || password.length < 8 || password.length > 128) return res.status(400).json({ error: 'Data pendaftaran tidak valid' });
   try {
     await ensureSchema();
@@ -82,7 +126,7 @@ app.post('/register', async (req, res) => {
     // Satu perintah SQL membuat user dan seluruh record awal secara atomik.
     const rows = await sql`WITH new_user AS (
       INSERT INTO users (username, email, password_hash)
-      VALUES (${username}, ${email.toLowerCase()}, ${passwordHash})
+      VALUES (${username}, ${email}, ${passwordHash})
       RETURNING id, username, email
     ), new_profile AS (
       INSERT INTO profiles (user_id, display_name)
@@ -105,8 +149,10 @@ app.post('/register', async (req, res) => {
   }
 });
 
-app.post('/login', async (req, res) => {
-  const { login, password } = req.body || {};
+app.post('/login', rateLimit('login'), async (req, res) => {
+  const rawLogin = req.body && req.body.login;
+  const password = req.body && req.body.password;
+  const login = typeof rawLogin === 'string' ? rawLogin.trim() : rawLogin;
   if (typeof login !== 'string' || typeof password !== 'string') return res.status(400).json({ error: 'Login tidak valid' });
   try {
     await ensureSchema();
@@ -114,6 +160,7 @@ app.post('/login', async (req, res) => {
     const rows = await sql`SELECT id, username, email, password_hash FROM users WHERE username=${login} OR email=${login.toLowerCase()} LIMIT 1`;
     if (!rows[0] || !(await verifyPassword(password, rows[0].password_hash))) return res.status(401).json({ error: 'Nama pengguna atau kata sandi salah' });
     const token = crypto.randomBytes(32).toString('hex');
+    await sql`DELETE FROM sessions WHERE expires_at <= now()`;
     await sql`INSERT INTO sessions (token_hash,user_id,expires_at) VALUES (${tokenHash(token)},${rows[0].id},now()+interval '7 days')`;
     setSessionCookie(res, token);
     res.json({ ok: true, user: { id: rows[0].id, username: rows[0].username, email: rows[0].email } });
@@ -133,5 +180,10 @@ app.post('/logout', async (req, res) => {
 });
 app.all('/payments', (req, res) => res.status(403).json({ error: 'Payment masih dinonaktifkan untuk staging' }));
 app.all('/withdrawals', (req, res) => res.status(403).json({ error: 'Withdrawal masih dinonaktifkan untuk staging' }));
+
+app.use((error, req, res, next) => {
+  if (error instanceof SyntaxError && error.status === 400 && error.type === 'entity.parse.failed') return res.status(400).json({ error: 'JSON tidak valid' });
+  res.status(500).json({ error: 'Terjadi kesalahan pada server' });
+});
 
 module.exports = app;
