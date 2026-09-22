@@ -1,5 +1,6 @@
 {
   "rewrites": [
+    { "source": "/api/login", "destination": "/login" },
     { "source": "/api/:path*", "destination": "/api" }
   ],
   "headers": [
