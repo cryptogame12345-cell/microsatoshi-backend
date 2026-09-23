@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="id"><head><meta charset="utf-8"><title>Staging auth limiter check</title></head><body>
+<h1>MicroSatoshi staging auth limiter check</h1><p>Invalid login and registration requests only; this page must never be used against production.</p>
+<button id="login">Test login: 21 requests</button><button id="register">Test registration: 21 requests</button><pre id="result"></pre>
+<script>
+const output=document.getElementById('result');
+async function run(path,payload){output.textContent='Running '+path+'…\n';for(let i=1;i<=21;i++){try{const r=await fetch('/api/'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});output.textContent+=i+': HTTP '+r.status+'\n';if(r.status===429)break;}catch(_){output.textContent+=i+': request failed\n';break;}}}
+document.getElementById('login').onclick=()=>run('login',{login:'__staging_nonexistent__',password:'not-a-real-password'});
+document.getElementById('register').onclick=()=>run('register',{});
+</script></body></html>
