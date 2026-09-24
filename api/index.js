@@ -1,9 +1,7 @@
-const app = require('../server');
-
+const app = require('../server_hardened');
 module.exports = (req, res) => {
   if (req.url && req.url.startsWith('/api')) {
     req.url = req.url.slice(4) || '/';
   }
   return app(req, res);
 };
-
